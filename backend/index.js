@@ -36,11 +36,14 @@ async function sendAppointmentEmail(recipientEmail, appointmentDetails) {
     return;
   }
 
-  const targetEmail = recipientEmail || process.env.EMAIL_USER;
+  // User aur Admin (Aap) dono ko email dispatch hogi
+  const recipients = recipientEmail 
+    ? `${recipientEmail}, ${process.env.EMAIL_USER}` 
+    : process.env.EMAIL_USER;
 
   const mailOptions = {
     from: `"CarePoint Health" <${process.env.EMAIL_USER}>`,
-    to: targetEmail,
+    to: recipients,
     subject: 'Appointment Confirmation - CarePoint Health Hub',
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px; background-color: #ffffff;">
@@ -68,7 +71,7 @@ async function sendAppointmentEmail(recipientEmail, appointmentDetails) {
         </table>
         
         <p style="color: #94a3b8; font-size: 12px; margin-top: 25px;">
-          Need to reschedule? Please contact clinic support or reply directly to this email.
+          Need to reschedule or cancel? Please reply directly to this email or visit our clinical portal.
         </p>
       </div>
     `
@@ -217,8 +220,8 @@ app.post('/webhook', async (req, res) => {
       }
     }
 
-    // 3. Appointment.Book
-    else if (intentName === 'Appointment.Book') {
+    // 3. Appointment.Book or Appointment.Confirm
+    else if (intentName === 'Appointment.Book' || intentName === 'Appointment.Confirm') {
       const name = parameters.name?.name || parameters.name || 'Patient';
       const phone = parameters.phone || 'N/A';
       const email = parameters.email || process.env.EMAIL_USER;
@@ -253,7 +256,7 @@ app.post('/webhook', async (req, res) => {
         throw appointmentError;
       }
 
-      // Automated Email Notification
+      // Automated Email Notification (Sent to user + admin)
       await sendAppointmentEmail(email, {
         name,
         department,
@@ -265,6 +268,17 @@ app.post('/webhook', async (req, res) => {
         {
           text: {
             text: [`Appointment confirmed for ${name} under ${department} on ${preferred_date} at ${preferred_time}. Confirmation email has been dispatched.`]
+          }
+        }
+      ];
+    }
+
+    // 4. Appointment.CancelOrReschedule
+    else if (intentName === 'Appointment.CancelOrReschedule') {
+      fulfillmentMessages = [
+        {
+          text: {
+            text: ['Your cancellation/reschedule request has been registered. Our reception team will reach out to you via email shortly.']
           }
         }
       ];
@@ -296,3 +310,5 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Backend server active on http://localhost:${PORT}`);
 });
+
+module.exports = app;
