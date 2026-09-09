@@ -11,7 +11,12 @@ export default function App() {
   const sendMessageToApi = async (userText) => {
     setLoading(true);
     try {
-      const response = await fetch('http://localhost:5000/api/chat', {
+      // Relative URL use karein taake local aur Vercel dono pe chale
+      const apiUrl = window.location.hostname === 'localhost' 
+        ? 'http://localhost:5000/api/chat' 
+        : '/api/chat';
+
+      const response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: userText }),
@@ -78,9 +83,9 @@ export default function App() {
                   borderRadius: '10px',
                   fontSize: '0.92rem',
                   lineHeight: '1.4',
-                  background: msg.sender === 'user' ? '#2563eb' : (msg.text.includes('⚠️') ? '#fef2f2' : '#f1f5f9'),
-                  color: msg.sender === 'user' ? '#fff' : (msg.text.includes('⚠️') ? '#991b1b' : '#0f172a'),
-                  border: msg.text.includes('⚠️') ? '1px solid #fecaca' : 'none'
+                  background: msg.sender === 'user' ? '#2563eb' : (msg.text?.includes('⚠️') ? '#fef2f2' : '#f1f5f9'),
+                  color: msg.sender === 'user' ? '#fff' : (msg.text?.includes('⚠️') ? '#991b1b' : '#0f172a'),
+                  border: msg.text?.includes('⚠️') ? '1px solid #fecaca' : 'none'
                 }}>
                   {msg.text}
                 </div>
