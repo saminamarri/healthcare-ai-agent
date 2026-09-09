@@ -36,14 +36,13 @@ async function sendAppointmentEmail(recipientEmail, appointmentDetails) {
     return;
   }
 
-  // User aur Admin (Aap) dono ko email dispatch hogi
-  const recipients = recipientEmail 
-    ? `${recipientEmail}, ${process.env.EMAIL_USER}` 
+  const targetRecipient = recipientEmail
+    ? `${recipientEmail}, ${process.env.EMAIL_USER}`
     : process.env.EMAIL_USER;
 
   const mailOptions = {
     from: `"CarePoint Health" <${process.env.EMAIL_USER}>`,
-    to: recipients,
+    to: targetRecipient,
     subject: 'Appointment Confirmation - CarePoint Health Hub',
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px; background-color: #ffffff;">
@@ -71,7 +70,7 @@ async function sendAppointmentEmail(recipientEmail, appointmentDetails) {
         </table>
         
         <p style="color: #94a3b8; font-size: 12px; margin-top: 25px;">
-          Need to reschedule or cancel? Please reply directly to this email or visit our clinical portal.
+          Need to reschedule? Please reply directly to this email or contact support.
         </p>
       </div>
     `
@@ -92,6 +91,11 @@ app.get('/', (req, res) => {
 function evaluateTriage(message) {
   const lower = String(message || '').toLowerCase();
 
+  // Agar user mana kar raha ho toh critical ignore karein
+  if (lower.startsWith('no') || lower.includes("don't have") || lower.includes('no chest pain')) {
+    return 'mild';
+  }
+
   if (lower.includes('chest pain') || lower.includes('breathing') || lower.includes('emergency')) {
     return 'critical';
   }
@@ -110,8 +114,8 @@ function getReply(message, triageLevel) {
     return '⚠️ Immediate Attention Required: Please visit the emergency room immediately or call 1122.';
   }
 
-  if (lower.includes('no') || lower.includes('fine') || lower.includes('book') || lower.includes('appointment')) {
-    return 'Would you like to schedule an appointment with a General Physician? Please reply with your name and department.';
+  if (lower.includes('no') || lower.includes('fine')) {
+    return 'Would you like to schedule an appointment with a General Physician? Please reply in this format: confirm: Name, Department, Email';
   }
 
   if (triageLevel === 'urgent') {
@@ -129,23 +133,51 @@ async function healthcare({ message, source = 'web' }) {
     throw error;
   }
 
+  const lower = symptom.toLowerCase();
+
+  // Booking details check
+  if (lower.includes('book appointment') || lower.startsWith('confirm:')) {
+    const cleanMsg = symptom.replace(/confirm:/i, '').replace(/book appointment for/i, '').trim();
+    const parts = cleanMsg.split(',').map(s => s.trim());
+
+    const name = parts[0] || 'Patient';
+    const department = parts[1] || 'General Physician';
+    const email = parts[2] || process.env.EMAIL_USER;
+    const date = new Date().toISOString().split('T')[0];
+    const time = '10:00 AM';
+
+    const patientId = randomUUID();
+    await supabase.from('patients').insert([{ id: patientId, name, phone: 'N/A' }]);
+    await supabase.from('appointments').insert([{
+      patient_id: patientId,
+      department,
+      preferred_date: date,
+      preferred_time: '10:00:00',
+      status: 'confirmed'
+    }]);
+
+    await sendAppointmentEmail(email, { name, department, date, time });
+
+    return {
+      triageLevel: 'mild',
+      reply: `✅ Appointment successfully confirmed for ${name} under ${department}! A confirmation email has been dispatched to ${email}.`
+    };
+  }
+
   const triageLevel = evaluateTriage(symptom);
   const symptomLogId = randomUUID();
+
   const { error: symptomError } = await supabase
     .from('symptoms_log')
     .insert([{ id: symptomLogId, symptom, source }]);
 
-  if (symptomError) {
-    throw symptomError;
-  }
+  if (symptomError) throw symptomError;
 
   const { error: triageError } = await supabase
     .from('triage_results')
     .insert([{ symptom_log_id: symptomLogId, triage_level: triageLevel, message: symptom, source }]);
 
-  if (triageError) {
-    throw triageError;
-  }
+  if (triageError) throw triageError;
 
   return { triageLevel, reply: getReply(symptom, triageLevel) };
 }
@@ -159,30 +191,17 @@ app.post('/webhook', async (req, res) => {
 
     let fulfillmentMessages = [];
 
-    // 1. Symptom.Collect
     if (intentName === 'Symptom.Collect') {
       const symptom = parameters.symptom || 'General illness';
       const duration = parameters.duration ? `${parameters.duration.amount || parameters.duration} days` : 'Not specified';
       const severity = parameters.severity || 'moderate';
 
-      const { error: symptomError } = await supabase
-        .from('symptoms_log')
-        .insert([{ id: randomUUID(), symptom, duration, severity, source: 'dialogflow' }]);
-
-      if (symptomError) {
-        throw symptomError;
-      }
+      await supabase.from('symptoms_log').insert([{ id: randomUUID(), symptom, duration, severity, source: 'dialogflow' }]);
 
       fulfillmentMessages = [
-        {
-          text: {
-            text: [`Noted: ${symptom} for ${duration} (Severity: ${severity}). Are you experiencing any severe breathing difficulty or chest tightness?`]
-          }
-        }
+        { text: { text: [`Noted: ${symptom} for ${duration} (Severity: ${severity}). Are you experiencing any severe breathing difficulty or chest tightness?`] } }
       ];
-    }
-
-    // 2. Symptom.FollowUp
+    } 
     else if (intentName === 'Symptom.FollowUp') {
       const userText = (queryResult.queryText || '').toLowerCase();
       let triageLevel = 'mild';
@@ -193,94 +212,45 @@ app.post('/webhook', async (req, res) => {
         triageLevel = 'urgent';
       }
 
-      const { error: triageError } = await supabase
-        .from('triage_results')
-        .insert([{ symptom_log_id: null, triage_level: triageLevel, message: userText, source: 'dialogflow' }]);
-
-      if (triageError) {
-        throw triageError;
-      }
+      await supabase.from('triage_results').insert([{ symptom_log_id: null, triage_level: triageLevel, message: userText, source: 'dialogflow' }]);
 
       if (triageLevel === 'critical') {
         fulfillmentMessages = [
-          {
-            text: {
-              text: ['⚠️ Immediate Attention Required: Please go directly to the nearest Emergency Room or call 1122.']
-            }
-          }
+          { text: { text: ['⚠️ Immediate Attention Required: Please go directly to the nearest Emergency Room or call 1122.'] } }
         ];
       } else {
         fulfillmentMessages = [
-          {
-            text: {
-              text: [`Triage evaluated as: ${triageLevel.toUpperCase()}. Would you like to schedule an appointment? Please provide your full name and preferred department.`]
-            }
-          }
+          { text: { text: [`Triage evaluated as: ${triageLevel.toUpperCase()}. Would you like to schedule an appointment? Please provide your full name and preferred department.`] } }
         ];
       }
-    }
-
-    // 3. Appointment.Book or Appointment.Confirm
+    } 
     else if (intentName === 'Appointment.Book' || intentName === 'Appointment.Confirm') {
       const name = parameters.name?.name || parameters.name || 'Patient';
       const phone = parameters.phone || 'N/A';
       const email = parameters.email || process.env.EMAIL_USER;
       const department = parameters.department || 'General Medicine';
-      const preferred_date = parameters.preferred_date
-        ? parameters.preferred_date.split('T')[0]
-        : new Date().toISOString().split('T')[0];
+      const preferred_date = parameters.preferred_date ? parameters.preferred_date.split('T')[0] : new Date().toISOString().split('T')[0];
       const preferred_time = parameters.preferred_time ? parameters.preferred_time.split('T')[1]?.substring(0, 5) : '10:00:00';
 
       const patientId = randomUUID();
-      const { error: patientError } = await supabase
-        .from('patients')
-        .insert([{ id: patientId, name, phone }]);
-
-      if (patientError) {
-        throw patientError;
-      }
-
-      const { error: appointmentError } = await supabase
-        .from('appointments')
-        .insert([
-          {
-            patient_id: patientId,
-            department,
-            preferred_date,
-            preferred_time,
-            status: 'confirmed'
-          }
-        ]);
-
-      if (appointmentError) {
-        throw appointmentError;
-      }
-
-      // Automated Email Notification (Sent to user + admin)
-      await sendAppointmentEmail(email, {
-        name,
+      await supabase.from('patients').insert([{ id: patientId, name, phone }]);
+      await supabase.from('appointments').insert([{
+        patient_id: patientId,
         department,
-        date: preferred_date,
-        time: preferred_time
-      });
+        preferred_date,
+        preferred_time,
+        status: 'confirmed'
+      }]);
+
+      await sendAppointmentEmail(email, { name, department, date: preferred_date, time: preferred_time });
 
       fulfillmentMessages = [
-        {
-          text: {
-            text: [`Appointment confirmed for ${name} under ${department} on ${preferred_date} at ${preferred_time}. Confirmation email has been dispatched.`]
-          }
-        }
+        { text: { text: [`Appointment confirmed for ${name} under ${department} on ${preferred_date} at ${preferred_time}. Confirmation email has been dispatched.`] } }
       ];
-    }
-
-    // 4. Appointment.CancelOrReschedule
+    } 
     else if (intentName === 'Appointment.CancelOrReschedule') {
       fulfillmentMessages = [
-        {
-          text: {
-            text: ['Your cancellation/reschedule request has been registered. Our reception team will reach out to you via email shortly.']
-          }
-        }
+        { text: { text: ['Your request has been received. Our reception team will reach out via email shortly.'] } }
       ];
     }
 
